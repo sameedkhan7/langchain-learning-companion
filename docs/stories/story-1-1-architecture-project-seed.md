@@ -106,10 +106,26 @@ Run only these lightweight checks, and record the commands actually run in the H
 
 When finished, record here:
 
-- The architecture approval (who approved, and when).
-- The exact commands that were run and whether each passed.
-- The files created or changed, matching the list above.
-- The Open WebUI connection value used (base URL and model name only).
-- Anything left out or not verified, stated plainly.
+- **Architecture approval:** `docs/architecture.md` approved by the instructor/user (sameedk499@gmail.com) on 2026-10-15, in chat ("approve"), before any Stage B work.
+- **Commands run:**
+  - `uv init --bare --name learning-companion --python 3.12 .` — passed.
+  - `uv add fastapi uvicorn pydantic-settings langchain langchain-xai` and `uv add --dev ruff pytest httpx` — passed.
+  - `uv sync` — passed.
+  - `uv run ruff format .` — passed (also prints "Failed to read" errors for junk `__MACOSX` files; harmless).
+  - `uv run ruff check .` — passed (after adding `# noqa: BLE001` on the in-stream error catch).
+  - `uv run pytest -q` — 1 passed.
+  - `uv run uvicorn learning_companion.api:app --host 127.0.0.1 --port 8011` with blank `GROK_API_KEY` — started OK. Port 8011 was used because port 8000 is occupied by an unrelated RAG app on this machine.
+  - `curl /health` — returned `{"status":"ok"}`, passed.
+  - `curl /v1/models` with blank model name — returned an empty list, passed.
+  - `POST /v1/chat/completions` (`stream: true`) with blank key — HTTP 503 "GROK_API_KEY is not set. Add it to your .env file."; `/health` still OK afterwards, passed.
+- **Files created or changed:** `docs/architecture.md`, `pyproject.toml`, `uv.lock`, `.env.example`, `.gitignore`, `README.md`, `src/learning_companion/__init__.py`, `settings.py`, `chain.py`, `api.py`, `tests/test_health.py`. Not committed: `.env` (does not exist yet). Beyond the list: `httpx` dev dependency (needed by FastAPI's test client) and a hatchling `[build-system]` section so the package imports under uvicorn.
+- **Open WebUI connection value:** base URL `http://127.0.0.1:8000/v1` (or `http://host.docker.internal:8000/v1` for Docker); model name = the instructor-supplied `GROK_MODEL_NAME`. Not actually entered into Open WebUI yet. If port 8000 stays busy, use `--port 8001` and `http://127.0.0.1:8001/v1`.
+- **Not verified:**
+  - No real Grok reply, streamed or non-streamed (no API key or model name available).
+  - `/v1/models` with a model name filled in.
+  - Selecting the model and chatting in the existing Open WebUI.
+  - The `stream: false` request path, including the 503 case (only the streaming 503 was exercised).
+  - Docker reachability of `127.0.0.1`.
+  - That `.env` holds the only copy of the real key (no `.env` exists yet; it is in `.gitignore`; the directory is not a git repository, so tracking was not checked with git).
 
 **What Story 2.1 will extend:** the same chain and the same single chat endpoint. Story 2.1 replaces the fixed one-message prompt with a full prompt built from system, user, and conversation messages, and adds conversation history. It does not add new routes or a new app.

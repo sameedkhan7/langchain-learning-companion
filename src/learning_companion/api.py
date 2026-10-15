@@ -94,7 +94,7 @@ async def chat_completions(request: ChatRequest):
             async for piece in chain.astream({"question": question}):
                 if piece:
                     yield _sse(chunk({"content": piece}))
-        except Exception as error:  # surface upstream failures inside the stream
+        except Exception as error:  # noqa: BLE001 - surface upstream failures in-stream
             yield _sse({"error": {"message": str(error)}})
         yield _sse(chunk({}, "stop"))
         yield _sse("[DONE]")
