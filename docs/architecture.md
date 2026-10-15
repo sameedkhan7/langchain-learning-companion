@@ -41,15 +41,15 @@ Python 3.12, UV, FastAPI, Pydantic settings, `langchain` with the Grok-compatibl
 ## Message flow
 
 ```
-request → latest user message picked → prompt (system instruction, then user message) → Grok → text → JSON or SSE
+request → latest user message picked → earlier supported user/assistant messages converted in order and trimmed to the last 6 → prompt (system instruction, history, latest user message) → Grok → text → JSON or SSE
 ```
 
 A `system` message in the request is treated as user-provided content and is never used as the application's system instruction.
 
 ## No-persistence boundary
 
-Nothing is stored between requests: no history, database, or memory. Each request is answered from the latest user message alone.
+Conversation history comes only from the current Open WebUI request. The application saves nothing after a request completes and adds no database or cross-session memory.
 
 ## Later growth
 
-Story 2.1 is the prompt template. Story 2.2 adds conversation history on the same chain and the same chat endpoint. LangGraph and agents come later still.
+Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint; Story 3.1 builds on it. LangGraph and agents come later still.

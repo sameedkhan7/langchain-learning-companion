@@ -1,8 +1,8 @@
 from functools import lru_cache
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_xai import ChatXAI
 
 from learning_companion.settings import get_settings
@@ -13,21 +13,28 @@ SYSTEM_INSTRUCTION = (
     "answers short unless the learner asks for more detail."
 )
 
+# Counts earlier user and assistant messages, excluding the latest question.
+MAX_HISTORY_MESSAGES = 6
+
 
 class ConfigurationError(RuntimeError):
     """Raised when a model call is attempted without required settings."""
 
 
 def build_prompt() -> ChatPromptTemplate:
-    """System instruction first, then the learner's current question."""
+    """System instruction, recent history, then the learner's current question."""
     return ChatPromptTemplate.from_messages(
-        [SystemMessage(content=SYSTEM_INSTRUCTION), ("human", "{question}")]
+        [
+            SystemMessage(content=SYSTEM_INSTRUCTION),
+            MessagesPlaceholder("history", optional=True),
+            ("human", "{question}"),
+        ]
     )
 
 
-def describe_prompt(question: str) -> list[str]:
+def describe_prompt(question: str, history: list[BaseMessage]) -> list[str]:
     """Development aid: message roles in order, never any content."""
-    messages = build_prompt().format_messages(question=question)
+    messages = build_prompt().format_messages(question=question, history=history)
     return [message.type for message in messages]
 
 

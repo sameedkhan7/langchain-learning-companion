@@ -2,13 +2,19 @@ import json
 import logging
 import time
 import uuid
-from typing import Literal
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import BaseModel
 
-from learning_companion.chain import ConfigurationError, describe_prompt, get_chain
+from learning_companion.chain import (
+    MAX_HISTORY_MESSAGES,
+    ConfigurationError,
+    describe_prompt,
+    get_chain,
+)
 from learning_companion.settings import get_settings
 
 logger = logging.getLogger("uvicorn.error")
@@ -17,8 +23,8 @@ app = FastAPI(title="Learning Companion Chatbot")
 
 
 class Message(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: str
+    content: str | list[Any] | None = None
 
 
 class ChatRequest(BaseModel):
@@ -43,11 +49,42 @@ def list_models():
     return {"object": "list", "data": data}
 
 
-def _latest_user_message(messages: list[Message]) -> str:
-    for message in reversed(messages):
-        if message.role == "user":
-            return message.content
+def _text_of(message: Message) -> str:
+    """Plain text of a message; list-style content keeps only its text parts."""
+    content = message.content
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+        return "".join(parts).strip()
     return ""
+
+
+def _build_history(messages: list[Message]) -> tuple[str, list[BaseMessage]]:
+    """Latest user question plus the recent user/assistant messages before it."""
+    supported = [
+        (message.role, text)
+        for message in messages
+        if message.role in ("user", "assistant") and (text := _text_of(message))
+    ]
+    for index in range(len(supported) - 1, -1, -1):
+        if supported[index][0] == "user":
+            question = supported[index][1]
+            earlier = supported[:index][-MAX_HISTORY_MESSAGES:]
+            history = [
+                HumanMessage(content=text)
+                if role == "user"
+                else AIMessage(content=text)
+                for role, text in earlier
+            ]
+            return question, history
+    return "", []
 
 
 def _sse(payload: dict | str) -> str:
@@ -62,9 +99,9 @@ async def chat_completions(request: ChatRequest):
     except ConfigurationError as error:
         return JSONResponse(status_code=503, content={"error": {"message": str(error)}})
 
-    question = _latest_user_message(request.messages)
+    question, history = _build_history(request.messages)
     if get_settings().app_env == "development":
-        roles = describe_prompt(question)
+        roles = describe_prompt(question, history)
         logger.info(
             "prompt: %s — %d messages; request system message set aside: %s",
             ", ".join(roles),
@@ -76,7 +113,7 @@ async def chat_completions(request: ChatRequest):
     model = request.model or get_settings().grok_model_name
 
     if not request.stream:
-        text = await chain.ainvoke({"question": question})
+        text = await chain.ainvoke({"question": question, "history": history})
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -102,7 +139,9 @@ async def chat_completions(request: ChatRequest):
 
     async def event_stream():
         try:
-            async for piece in chain.astream({"question": question}):
+            async for piece in chain.astream(
+                {"question": question, "history": history}
+            ):
                 if piece:
                     yield _sse(chunk({"content": piece}))
         except Exception as error:  # noqa: BLE001 - surface upstream failures in-stream
