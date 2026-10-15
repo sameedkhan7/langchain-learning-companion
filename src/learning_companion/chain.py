@@ -54,3 +54,42 @@ def get_chain():
         xai_api_base=settings.grok_api_base_url,
     )
     return build_prompt() | model | StrOutputParser()
+
+
+STUDY_SYSTEM_INSTRUCTION = (
+    "You are the Learning Companion in study-helper mode. Explain the beginner "
+    "technical concept the learner asks about in plain language. Give a concise "
+    "explanation, add a small example where it helps, and finish with exactly "
+    "one suggested next learning step. You are a language model only: do not "
+    "claim to research, browse, look up course material, or guarantee that your "
+    "answer is correct."
+)
+
+
+def build_study_prompt() -> ChatPromptTemplate:
+    """Study-helper instruction, recent history, then the learner's question."""
+    return ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=STUDY_SYSTEM_INSTRUCTION),
+            MessagesPlaceholder("history", optional=True),
+            ("human", "{question}"),
+        ]
+    )
+
+
+@lru_cache
+def get_study_chain():
+    settings = get_settings()
+    if not settings.grok_api_key:
+        raise ConfigurationError("GROK_API_KEY is not set. Add it to your .env file.")
+    if not settings.grok_model_name:
+        raise ConfigurationError(
+            "GROK_MODEL_NAME is not set. Add it to your .env file."
+        )
+
+    model = ChatXAI(
+        model=settings.grok_model_name,
+        api_key=settings.grok_api_key,
+        xai_api_base=settings.grok_api_base_url,
+    )
+    return build_study_prompt() | model | StrOutputParser()

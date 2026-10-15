@@ -50,6 +50,15 @@ A `system` message in the request is treated as user-provided content and is nev
 
 Conversation history comes only from the current Open WebUI request. The application saves nothing after a request completes and adds no database or cross-session memory.
 
+## Chain behaviours
+
+| Behaviour | Function | Responsibility |
+|-----------|----------|----------------|
+| General chat | `get_chain` | Greetings and ordinary conversation. The active chain behind `/v1/chat/completions`. |
+| Study helper | `get_study_chain` | Beginner technical explanations ending with one next learning step. Available after Story 3.1 but not yet reachable from Open WebUI. |
+
+Both use the same Grok model, the same request-provided history, the same endpoint, and the same Open WebUI conversation. Story 3.1 creates the study-helper capability only; selecting between the chains is Story 3.2.
+
 ## Later growth
 
-Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint; Story 3.1 builds on it. LangGraph and agents come later still.
+Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains. LangGraph and agents come later still.

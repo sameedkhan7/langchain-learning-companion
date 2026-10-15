@@ -130,3 +130,32 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Expected: HTTP 200, but the answer is generic or asks what "that" refers to, since nothing is stored between requests.
+
+## Story 3.1 — Study-Helper Chain
+
+**What it adds:** a separate study-helper LangChain chain (`get_study_chain`) that explains a beginner concept and ends with one next step, reachable only from a local dev command; `/v1/chat/completions` still uses the unchanged general-chat chain.
+
+Prerequisite: `GROK_API_KEY` and `GROK_MODEL_NAME` set in `.env`. The study helper has no HTTP route yet (Story 3.2 adds `/study`), so it is run from the command line.
+
+```bash
+# 1. Study helper, local invocation
+uv run python -m learning_companion.study_dev "What is an API?"
+```
+
+Expected: prints a short plain-language explanation of an API, a small example, and exactly one suggested next learning step at the end, with no claim of browsing, research, or guaranteed accuracy.
+
+```bash
+# 2. Failure case: blank GROK_API_KEY in .env
+uv run python -m learning_companion.study_dev "What is an API?"
+```
+
+Expected: prints "GROK_API_KEY is not set. Add it to your .env file." and exits with code 1.
+
+```bash
+# 3. General chat unchanged (start the API first: uv run uvicorn learning_companion.api:app --host 127.0.0.1 --port 8000)
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":false,"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Expected: HTTP 200, `object: "chat.completion"`, `finish_reason: "stop"`, and a short friendly general-chat reply with no forced next-step ending.
