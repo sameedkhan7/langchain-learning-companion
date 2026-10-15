@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import uuid
 from typing import Literal
@@ -7,8 +8,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from learning_companion.chain import ConfigurationError, get_chain
+from learning_companion.chain import ConfigurationError, describe_prompt, get_chain
 from learning_companion.settings import get_settings
+
+logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Learning Companion Chatbot")
 
@@ -60,6 +63,14 @@ async def chat_completions(request: ChatRequest):
         return JSONResponse(status_code=503, content={"error": {"message": str(error)}})
 
     question = _latest_user_message(request.messages)
+    if get_settings().app_env == "development":
+        roles = describe_prompt(question)
+        logger.info(
+            "prompt: %s — %d messages; request system message set aside: %s",
+            ", ".join(roles),
+            len(roles),
+            any(m.role == "system" for m in request.messages),
+        )
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     model = request.model or get_settings().grok_model_name
