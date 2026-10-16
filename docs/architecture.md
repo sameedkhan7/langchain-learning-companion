@@ -41,7 +41,7 @@ Python 3.12, UV, FastAPI, Pydantic settings, `langchain` with the Grok-compatibl
 ## Message flow
 
 ```
-request → latest user message picked and history built (last 6 earlier user/assistant messages, in order) → graph (router → one answer node: `general_chat` or `study_helper`, each calling its existing chain: system instruction, history, question → Grok) → text with route label → JSON or SSE
+request → latest user message picked and history built (last 6 earlier user/assistant messages, in order) → graph (router → one answer node writing a draft → reviewer → at most one improvement → reviewer → `final_answer`) → text with route label → JSON or SSE
 ```
 
 ### The `/study` rule
@@ -57,32 +57,48 @@ A `system` message in the request is treated as user-provided content and is nev
 ## Workflow graph
 
 ```
-START → router ──general──→ general_chat → END
-                └──study───→ study_helper → END
+START → router ──general──→ general_chat ─┐
+                └──study───→ study_helper ─┤
+                                           ▼
+                                  ┌─ answer_reviewer ──approve──→ END
+                                  │        │
+                                  │     improve (only if revision_count == 0)
+                                  │        ▼
+                                  └── answer_improver
 ```
 
-Built in `src/learning_companion/graph.py` with LangGraph. A **node** is a focused piece of work, not automatically an agent.
+Built in `src/learning_companion/graph.py` with LangGraph; the two specialist chains live in `src/learning_companion/review.py`. A **node** is a focused piece of work, not automatically an agent.
 
-**State fields** (live for one request only):
+**State fields** (live for one request only; nine in total):
 
 | Field | Meaning |
 |-------|---------|
 | `user_message` | The learner's current question; the router strips a leading `/study`. |
 | `messages` | Up to 6 earlier user/assistant messages, built by `_build_history`. |
 | `route` | `general` or `study`, written by the router. |
-| `answer` | Final answer text, written by an answer node. |
+| `draft_answer` | The current answer text: the first draft from an answer node, replaced by the improver's rewrite. Never sent to Open WebUI directly. |
+| `review_decision` | `approve` or `improve`; empty until the reviewer has run. |
+| `review_reason` | One short plain-English sentence from the reviewer, passed to the improver. |
+| `revision_count` | How many times the improver has run: `0`, then `1`, never higher. This is the limit. |
+| `final_answer` | The accepted answer, a copy of `draft_answer` once the reviewer approves. This is what Open WebUI receives. |
 
 **Node responsibilities:**
 
-- `router`: ordinary Python, applies the `/study` rule, writes `route` and the cleaned `user_message`.
-- `general_chat`: calls `get_chain()` and writes `answer`.
-- `study_helper`: calls `get_study_chain()` and writes `answer`.
+- `router`: ordinary Python, applies the `/study` rule, writes `route` and the cleaned `user_message`. Not an agent.
+- `general_chat`: calls `get_chain()` and writes `draft_answer`.
+- `study_helper`: calls `get_study_chain()` and writes `draft_answer`.
+- `answer_reviewer`: small Grok-powered specialist node (a "specialist agent" for this classroom example). Checks the draft against one short fixed rule and writes a structured `review_decision` and `review_reason`. When approving, it copies the draft to `final_answer`. If `revision_count >= 1` it skips the model and approves, so the limit is enforced in code. An unreadable review counts as `approve`.
+- `answer_improver`: small Grok-powered specialist node. Rewrites the draft once using the reviewer's reason, writes `draft_answer`, and increments `revision_count`. No tools, browsing, retrieval, planning, or routing.
 
-**Edge rules:** `START → router`; one conditional edge from `router` reading `route`; `general_chat → END`; `study_helper → END`.
+**Edge rules:** `START → router`; one conditional edge from `router` reading `route`; `general_chat → answer_reviewer`; `study_helper → answer_reviewer`; `answer_reviewer → END` when approved; `answer_reviewer → answer_improver` only when `review_decision == "improve"` and `revision_count == 0` (any other case ends); `answer_improver → answer_reviewer`.
 
-The chat endpoint runs the graph and still returns the same OpenAI-compatible JSON or SSE. In development, one log line shows the route and node sequence (e.g. `route=study | nodes: router → study_helper`), with no keys, instructions, or message text.
+**One-revision limit:** the visible cycle reviewer → improver → reviewer runs at most once. After one improvement the reviewer must accept the current draft and the graph ends.
 
-**Out of scope:** review or improve steps, loops, retries, additional agents, tools, MCP, RAG, web search, databases, persistence, human approval, and production concerns.
+The chat endpoint runs the graph and returns the same OpenAI-compatible JSON or SSE, built from `final_answer`. In development, one log line shows the route, last review decision, revision count, and the nodes that ran (e.g. `route=study | review=approve | revisions=1 | nodes: router → study_helper → answer_reviewer → answer_improver → answer_reviewer`), with no keys, instructions, reasons, or message text.
+
+**Streaming trade-off:** drafts may be replaced, so draft text is never streamed. The `[route: ...]` label is sent after the router; the reviewed `final_answer` is then sent in small chunks followed by `stop` and `[DONE]`. The answer appears after review rather than word by word.
+
+**Scope boundary (deliberate):** no tools, no MCP call (a future node could hold one), no retrieval, no web search, no planner, no extra loop or retry, no human approval, no databases or persistence, and no production controls.
 
 ## No-persistence boundary
 
@@ -99,4 +115,4 @@ Both use the same Grok model, the same request-provided history, the same endpoi
 
 ## Later growth
 
-Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains, and Story 4.1 replaces the internal `if/else` with an explicit LangGraph route. Story 4.2 adds a bounded review path to this graph.
+Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains, and Story 4.1 replaces the internal `if/else` with an explicit LangGraph route. Story 4.2 adds the bounded review path (reviewer and improver, one revision at most) and completes the course capstone.

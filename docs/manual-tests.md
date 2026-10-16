@@ -270,3 +270,54 @@ curl -i -X POST http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Expected: HTTP 503 with `error.message` "GROK_API_KEY is not set. Add it to your .env file.", returned before the graph runs.
+
+## Story 4.2 — Bounded Review and Improve
+
+**What it adds:** after the router and answer node write a draft, a reviewer node checks it once and an improver node rewrites it at most once, so `/v1/chat/completions` returns only the reviewed final answer; requests, responses, and the `[route: ...]` label look the same as before.
+
+Prerequisite: start the API (`APP_ENV=development uv run uvicorn learning_companion.api:app --host 127.0.0.1 --port 8000`) with `GROK_API_KEY` and `GROK_MODEL_NAME` set in `.env`. Use `--port 8011` and change the URLs below if port 8000 is busy. The API terminal shows the `route=... | review=... | revisions=... | nodes: ...` trace line.
+
+```bash
+# 1. General route (non-streaming)
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":false,"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Expected: HTTP 200, `object: "chat.completion"`, `finish_reason: "stop"`, and `choices[0].message.content` starts with `[route: general]` followed by a short friendly reply. Trace shows `route=general | review=approve | revisions=0 | nodes: router → general_chat → answer_reviewer`.
+
+```bash
+# 2. Study route (non-streaming)
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":false,"messages":[{"role":"user","content":"/study What is a closure?"}]}'
+```
+
+Expected: HTTP 200 and the content starts with `[route: study]`, then a plain-language explanation ending with one next learning step. The reviewer (Grok) decides: trace shows `revisions=0` with `router → study_helper → answer_reviewer`, or, if it asked for an improvement, `revisions=1` with `router → study_helper → answer_reviewer → answer_improver → answer_reviewer`. Either way `review=approve` and the improver never runs twice.
+
+```bash
+# 3. Study route (streaming)
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":true,"messages":[{"role":"user","content":"/study What is a closure?"}]}'
+```
+
+Expected: the first `data:` chunk's `delta.content` is `[route: study]` plus a blank line, then the reviewed final answer in small text chunks (sent after the review finishes, not draft text), a chunk with `finish_reason: "stop"`, and the response ends with `data: [DONE]`.
+
+```bash
+# 4. Edge case: "/studying" is not the marker, so it stays on the general route
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"/studying is fun"}]}'
+```
+
+Expected: HTTP 200 and the content starts with `[route: general]`; trace shows `route=general` and starts `nodes: router → general_chat → answer_reviewer`.
+
+```bash
+# 5. Failure case: blank GROK_API_KEY (restart the API after editing .env)
+curl -i -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Expected: HTTP 503 with `error.message` "GROK_API_KEY is not set. Add it to your .env file.", returned before the graph runs.

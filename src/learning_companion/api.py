@@ -15,8 +15,6 @@ from learning_companion.settings import get_settings
 
 logger = logging.getLogger("uvicorn.error")
 
-ANSWER_NODES = ("general_chat", "study_helper")
-
 app = FastAPI(title="Learning Companion Chatbot")
 
 
@@ -99,15 +97,30 @@ async def chat_completions(request: ChatRequest):
         return JSONResponse(status_code=503, content={"error": {"message": str(error)}})
 
     graph = build_graph()
-    state = {"user_message": question, "messages": history, "route": "", "answer": ""}
+    state = {
+        "user_message": question,
+        "messages": history,
+        "route": "",
+        "draft_answer": "",
+        "review_decision": "",
+        "review_reason": "",
+        "revision_count": 0,
+        "final_answer": "",
+    }
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     model = request.model or get_settings().grok_model_name
     development = get_settings().app_env == "development"
 
-    def trace(route: str, nodes: list[str]) -> None:
+    def trace(route: str, review: str, revisions: int, nodes: list[str]) -> None:
         if development:
-            logger.info("route=%s | nodes: %s", route, " → ".join(nodes))
+            logger.info(
+                "route=%s | review=%s | revisions=%d | nodes: %s",
+                route,
+                review,
+                revisions,
+                " → ".join(nodes),
+            )
 
     if not request.stream:
         nodes: list[str] = []
@@ -116,7 +129,7 @@ async def chat_completions(request: ChatRequest):
             for node, values in update.items():
                 nodes.append(node)
                 final.update(values)
-        trace(final["route"], nodes)
+        trace(final["route"], final["review_decision"], final["revision_count"], nodes)
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -127,7 +140,8 @@ async def chat_completions(request: ChatRequest):
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": f"[route: {final['route']}]\n\n" + final["answer"],
+                        "content": f"[route: {final['route']}]\n\n"
+                        + final["final_answer"],
                     },
                     "finish_reason": "stop",
                 }
@@ -145,24 +159,23 @@ async def chat_completions(request: ChatRequest):
 
     async def event_stream():
         nodes: list[str] = []
-        route = ""
+        final: dict = dict(state)
         try:
-            async for mode, data in graph.astream(
-                state, stream_mode=["updates", "messages"]
-            ):
-                if mode == "updates":
-                    for node, values in data.items():
-                        nodes.append(node)
-                        if node == "router":
-                            route = values["route"]
-                            yield _sse(chunk({"content": f"[route: {route}]\n\n"}))
-                else:
-                    piece, metadata = data
-                    if metadata.get("langgraph_node") in ANSWER_NODES and piece.content:
-                        yield _sse(chunk({"content": piece.content}))
+            async for update in graph.astream(state, stream_mode="updates"):
+                for node, values in update.items():
+                    nodes.append(node)
+                    final.update(values)
+                    if node == "router":
+                        yield _sse(chunk({"content": f"[route: {final['route']}]\n\n"}))
+            words = final["final_answer"].split(" ")
+            for start in range(0, len(words), 4):
+                text = " ".join(words[start : start + 4])
+                if start + 4 < len(words):
+                    text += " "
+                yield _sse(chunk({"content": text}))
         except Exception as error:  # noqa: BLE001 - surface upstream failures in-stream
             yield _sse({"error": {"message": str(error)}})
-        trace(route, nodes)
+        trace(final["route"], final["review_decision"], final["revision_count"], nodes)
         yield _sse(chunk({}, "stop"))
         yield _sse("[DONE]")
 
