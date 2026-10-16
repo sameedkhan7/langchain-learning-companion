@@ -32,7 +32,7 @@ There is one chat route only.
 
 ## Stack
 
-Python 3.12, UV, FastAPI, Pydantic settings, `langchain` with the Grok-compatible provider integration (`langchain-xai`), Uvicorn, Ruff, and a minimal test runner (pytest).
+Python 3.12, UV, FastAPI, Pydantic settings, `langchain` with the Grok-compatible provider integration (`langchain-xai`), `langgraph`, Uvicorn, Ruff, and a minimal test runner (pytest).
 
 ## Configuration names
 
@@ -41,7 +41,7 @@ Python 3.12, UV, FastAPI, Pydantic settings, `langchain` with the Grok-compatibl
 ## Message flow
 
 ```
-request → latest user message picked and history built (last 6 earlier user/assistant messages, in order) → route rule (`/study` prefix or not) → selected chain (`get_study_chain` or `get_chain`: system instruction, history, question) → Grok → text with route label → JSON or SSE
+request → latest user message picked and history built (last 6 earlier user/assistant messages, in order) → graph (router → one answer node: `general_chat` or `study_helper`, each calling its existing chain: system instruction, history, question → Grok) → text with route label → JSON or SSE
 ```
 
 ### The `/study` rule
@@ -50,9 +50,39 @@ If the trimmed latest user message is `/study` alone, or starts with `/study` fo
 
 The reply text starts with `[route: general]` or `[route: study]` and a blank line; in development the log line also states the route. The label then appears in later requests' history as part of the earlier assistant message.
 
-This is **deterministic application routing** (one plain Python `if`/`else`), not LLM classification, LangGraph, or multi-agent orchestration.
+This is **deterministic application routing** inside the router node of the workflow graph below. It is ordinary application logic, not LLM classification and not an agent.
 
 A `system` message in the request is treated as user-provided content and is never used as the application's system instruction.
+
+## Workflow graph
+
+```
+START → router ──general──→ general_chat → END
+                └──study───→ study_helper → END
+```
+
+Built in `src/learning_companion/graph.py` with LangGraph. A **node** is a focused piece of work, not automatically an agent.
+
+**State fields** (live for one request only):
+
+| Field | Meaning |
+|-------|---------|
+| `user_message` | The learner's current question; the router strips a leading `/study`. |
+| `messages` | Up to 6 earlier user/assistant messages, built by `_build_history`. |
+| `route` | `general` or `study`, written by the router. |
+| `answer` | Final answer text, written by an answer node. |
+
+**Node responsibilities:**
+
+- `router`: ordinary Python, applies the `/study` rule, writes `route` and the cleaned `user_message`.
+- `general_chat`: calls `get_chain()` and writes `answer`.
+- `study_helper`: calls `get_study_chain()` and writes `answer`.
+
+**Edge rules:** `START → router`; one conditional edge from `router` reading `route`; `general_chat → END`; `study_helper → END`.
+
+The chat endpoint runs the graph and still returns the same OpenAI-compatible JSON or SSE. In development, one log line shows the route and node sequence (e.g. `route=study | nodes: router → study_helper`), with no keys, instructions, or message text.
+
+**Out of scope:** review or improve steps, loops, retries, additional agents, tools, MCP, RAG, web search, databases, persistence, human approval, and production concerns.
 
 ## No-persistence boundary
 
@@ -69,4 +99,4 @@ Both use the same Grok model, the same request-provided history, the same endpoi
 
 ## Later growth
 
-Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains, and Story 4.1 replaces the internal `if/else` with an explicit LangGraph route. Agents come later still.
+Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains, and Story 4.1 replaces the internal `if/else` with an explicit LangGraph route. Story 4.2 adds a bounded review path to this graph.

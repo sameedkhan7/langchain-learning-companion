@@ -9,16 +9,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import BaseModel
 
-from learning_companion.chain import (
-    MAX_HISTORY_MESSAGES,
-    ConfigurationError,
-    describe_prompt,
-    get_chain,
-    get_study_chain,
-)
+from learning_companion.chain import MAX_HISTORY_MESSAGES, ConfigurationError, get_chain
+from learning_companion.graph import build_graph
 from learning_companion.settings import get_settings
 
 logger = logging.getLogger("uvicorn.error")
+
+ANSWER_NODES = ("general_chat", "study_helper")
 
 app = FastAPI(title="Learning Companion Chatbot")
 
@@ -88,19 +85,6 @@ def _build_history(messages: list[Message]) -> tuple[str, list[BaseMessage]]:
     return "", []
 
 
-STUDY_MARKER = "/study"
-STUDY_FALLBACK_QUESTION = "What should I study first as a beginner?"
-
-
-def _choose_route(question: str) -> tuple[str, str]:
-    """Plain rule: a leading '/study' picks the study chain, else general."""
-    after = question[len(STUDY_MARKER) :]
-    if question.startswith(STUDY_MARKER) and (not after or after[0].isspace()):
-        rest = question[len(STUDY_MARKER) :].strip()
-        return "study", rest or STUDY_FALLBACK_QUESTION
-    return "general", question
-
-
 def _sse(payload: dict | str) -> str:
     body = payload if isinstance(payload, str) else json.dumps(payload)
     return f"data: {body}\n\n"
@@ -109,28 +93,30 @@ def _sse(payload: dict | str) -> str:
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
     question, history = _build_history(request.messages)
-    route, question = _choose_route(question)
     try:
-        chain = get_study_chain() if route == "study" else get_chain()
+        get_chain()  # fail early with 503 if Grok settings are missing
     except ConfigurationError as error:
         return JSONResponse(status_code=503, content={"error": {"message": str(error)}})
 
-    label = f"[route: {route}]\n\n"
-    if get_settings().app_env == "development":
-        roles = describe_prompt(question, history, study=route == "study")
-        logger.info(
-            "route: %s; prompt: %s — %d messages; request system message set aside: %s",
-            route,
-            ", ".join(roles),
-            len(roles),
-            any(m.role == "system" for m in request.messages),
-        )
+    graph = build_graph()
+    state = {"user_message": question, "messages": history, "route": "", "answer": ""}
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     model = request.model or get_settings().grok_model_name
+    development = get_settings().app_env == "development"
+
+    def trace(route: str, nodes: list[str]) -> None:
+        if development:
+            logger.info("route=%s | nodes: %s", route, " → ".join(nodes))
 
     if not request.stream:
-        text = await chain.ainvoke({"question": question, "history": history})
+        nodes: list[str] = []
+        final: dict = dict(state)
+        async for update in graph.astream(state, stream_mode="updates"):
+            for node, values in update.items():
+                nodes.append(node)
+                final.update(values)
+        trace(final["route"], nodes)
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -139,7 +125,10 @@ async def chat_completions(request: ChatRequest):
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": label + text},
+                    "message": {
+                        "role": "assistant",
+                        "content": f"[route: {final['route']}]\n\n" + final["answer"],
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -155,15 +144,25 @@ async def chat_completions(request: ChatRequest):
         }
 
     async def event_stream():
-        yield _sse(chunk({"content": label}))
+        nodes: list[str] = []
+        route = ""
         try:
-            async for piece in chain.astream(
-                {"question": question, "history": history}
+            async for mode, data in graph.astream(
+                state, stream_mode=["updates", "messages"]
             ):
-                if piece:
-                    yield _sse(chunk({"content": piece}))
+                if mode == "updates":
+                    for node, values in data.items():
+                        nodes.append(node)
+                        if node == "router":
+                            route = values["route"]
+                            yield _sse(chunk({"content": f"[route: {route}]\n\n"}))
+                else:
+                    piece, metadata = data
+                    if metadata.get("langgraph_node") in ANSWER_NODES and piece.content:
+                        yield _sse(chunk({"content": piece.content}))
         except Exception as error:  # noqa: BLE001 - surface upstream failures in-stream
             yield _sse({"error": {"message": str(error)}})
+        trace(route, nodes)
         yield _sse(chunk({}, "stop"))
         yield _sse("[DONE]")
 
