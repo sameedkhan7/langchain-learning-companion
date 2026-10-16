@@ -32,9 +32,12 @@ def build_prompt() -> ChatPromptTemplate:
     )
 
 
-def describe_prompt(question: str, history: list[BaseMessage]) -> list[str]:
+def describe_prompt(
+    question: str, history: list[BaseMessage], study: bool = False
+) -> list[str]:
     """Development aid: message roles in order, never any content."""
-    messages = build_prompt().format_messages(question=question, history=history)
+    prompt = build_study_prompt() if study else build_prompt()
+    messages = prompt.format_messages(question=question, history=history)
     return [message.type for message in messages]
 
 

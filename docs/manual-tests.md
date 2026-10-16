@@ -159,3 +159,63 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Expected: HTTP 200, `object: "chat.completion"`, `finish_reason: "stop"`, and a short friendly general-chat reply with no forced next-step ending.
+
+## Story 3.2 — Visible Python Routing
+
+**What it adds:** `/v1/chat/completions` uses a plain Python rule to pick the chain: a message starting with `/study` goes to the study-helper chain (with the marker stripped), anything else to the general-chat chain, and every reply starts with `[route: general]` or `[route: study]`.
+
+Prerequisite: start the API (`uv run uvicorn learning_companion.api:app --host 127.0.0.1 --port 8000`) with `GROK_API_KEY` and `GROK_MODEL_NAME` set in `.env`. Use `--port 8011` and change the URLs below if port 8000 is busy. Set `APP_ENV=development` to see the `route:` log line.
+
+```bash
+# 1. General route (non-streaming)
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":false,"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Expected: HTTP 200, `object: "chat.completion"`, and `choices[0].message.content` starts with `[route: general]` followed by a short friendly reply with no forced next-step ending. Dev log shows `route: general; prompt: system, human — 2 messages`.
+
+```bash
+# 2. Study route (non-streaming)
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":false,"messages":[{"role":"user","content":"/study Explain what an API is"}]}'
+```
+
+Expected: HTTP 200 and `choices[0].message.content` starts with `[route: study]`, then a plain-language explanation of an API ending with exactly one suggested next learning step. Dev log shows `route: study`; the `/study` marker is not part of the question the chain receives.
+
+```bash
+# 3. Study route (streaming)
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream":true,"messages":[{"role":"user","content":"/study Explain what an API is"}]}'
+```
+
+Expected: the first `data:` chunk's `delta.content` is `[route: study]` plus a blank line, then text chunks, a chunk with `finish_reason: "stop"`, and the response ends with `data: [DONE]`.
+
+```bash
+# 4. Edge case: "/studying" is not the marker, so it stays on the general route
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"/studying is fun"}]}'
+```
+
+Expected: HTTP 200 and the content starts with `[route: general]` (the marker is case-sensitive and must be followed by whitespace or nothing).
+
+```bash
+# 5. Edge case: bare "/study" uses the fixed fallback question
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"/study"}]}'
+```
+
+Expected: HTTP 200 and the content starts with `[route: study]`, answering "What should I study first as a beginner?" with one next step.
+
+```bash
+# 6. Failure case: blank GROK_API_KEY (restart the API after editing .env)
+curl -i -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"/study Explain what an API is"}]}'
+```
+
+Expected: HTTP 503 with `error.message` "GROK_API_KEY is not set. Add it to your .env file." (same for either route).

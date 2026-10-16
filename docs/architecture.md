@@ -41,8 +41,16 @@ Python 3.12, UV, FastAPI, Pydantic settings, `langchain` with the Grok-compatibl
 ## Message flow
 
 ```
-request → latest user message picked → earlier supported user/assistant messages converted in order and trimmed to the last 6 → prompt (system instruction, history, latest user message) → Grok → text → JSON or SSE
+request → latest user message picked and history built (last 6 earlier user/assistant messages, in order) → route rule (`/study` prefix or not) → selected chain (`get_study_chain` or `get_chain`: system instruction, history, question) → Grok → text with route label → JSON or SSE
 ```
+
+### The `/study` rule
+
+If the trimmed latest user message is `/study` alone, or starts with `/study` followed by whitespace, the route is `study` and only that leading marker (and surrounding whitespace) is stripped. The marker is case-sensitive. A bare `/study` uses the fixed fallback question "What should I study first as a beginner?". Anything else, including `/studying` or `/study` mid-sentence, is `general` with the question unchanged. Earlier history messages are never rewritten.
+
+The reply text starts with `[route: general]` or `[route: study]` and a blank line; in development the log line also states the route. The label then appears in later requests' history as part of the earlier assistant message.
+
+This is **deterministic application routing** (one plain Python `if`/`else`), not LLM classification, LangGraph, or multi-agent orchestration.
 
 A `system` message in the request is treated as user-provided content and is never used as the application's system instruction.
 
@@ -55,10 +63,10 @@ Conversation history comes only from the current Open WebUI request. The applica
 | Behaviour | Function | Responsibility |
 |-----------|----------|----------------|
 | General chat | `get_chain` | Greetings and ordinary conversation. The active chain behind `/v1/chat/completions`. |
-| Study helper | `get_study_chain` | Beginner technical explanations ending with one next learning step. Available after Story 3.1 but not yet reachable from Open WebUI. |
+| Study helper | `get_study_chain` | Beginner technical explanations ending with one next learning step. Reachable from Open WebUI by starting a message with `/study`. |
 
-Both use the same Grok model, the same request-provided history, the same endpoint, and the same Open WebUI conversation. Story 3.1 creates the study-helper capability only; selecting between the chains is Story 3.2.
+Both use the same Grok model, the same request-provided history, the same endpoint, and the same Open WebUI conversation. Story 3.1 created the study-helper chain; Story 3.2 selects between the chains with the `/study` rule.
 
 ## Later growth
 
-Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains. LangGraph and agents come later still.
+Story 2.1 is the prompt template. Story 2.2 adds request-provided history on the same chain and chat endpoint. Story 3.1 adds the study-helper chain, and Story 3.2 adds the route rule that selects between the chains, and Story 4.1 replaces the internal `if/else` with an explicit LangGraph route. Agents come later still.

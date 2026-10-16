@@ -14,6 +14,7 @@ from learning_companion.chain import (
     ConfigurationError,
     describe_prompt,
     get_chain,
+    get_study_chain,
 )
 from learning_companion.settings import get_settings
 
@@ -87,6 +88,19 @@ def _build_history(messages: list[Message]) -> tuple[str, list[BaseMessage]]:
     return "", []
 
 
+STUDY_MARKER = "/study"
+STUDY_FALLBACK_QUESTION = "What should I study first as a beginner?"
+
+
+def _choose_route(question: str) -> tuple[str, str]:
+    """Plain rule: a leading '/study' picks the study chain, else general."""
+    after = question[len(STUDY_MARKER) :]
+    if question.startswith(STUDY_MARKER) and (not after or after[0].isspace()):
+        rest = question[len(STUDY_MARKER) :].strip()
+        return "study", rest or STUDY_FALLBACK_QUESTION
+    return "general", question
+
+
 def _sse(payload: dict | str) -> str:
     body = payload if isinstance(payload, str) else json.dumps(payload)
     return f"data: {body}\n\n"
@@ -94,16 +108,19 @@ def _sse(payload: dict | str) -> str:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
+    question, history = _build_history(request.messages)
+    route, question = _choose_route(question)
     try:
-        chain = get_chain()
+        chain = get_study_chain() if route == "study" else get_chain()
     except ConfigurationError as error:
         return JSONResponse(status_code=503, content={"error": {"message": str(error)}})
 
-    question, history = _build_history(request.messages)
+    label = f"[route: {route}]\n\n"
     if get_settings().app_env == "development":
-        roles = describe_prompt(question, history)
+        roles = describe_prompt(question, history, study=route == "study")
         logger.info(
-            "prompt: %s — %d messages; request system message set aside: %s",
+            "route: %s; prompt: %s — %d messages; request system message set aside: %s",
+            route,
             ", ".join(roles),
             len(roles),
             any(m.role == "system" for m in request.messages),
@@ -122,7 +139,7 @@ async def chat_completions(request: ChatRequest):
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": text},
+                    "message": {"role": "assistant", "content": label + text},
                     "finish_reason": "stop",
                 }
             ],
@@ -138,6 +155,7 @@ async def chat_completions(request: ChatRequest):
         }
 
     async def event_stream():
+        yield _sse(chunk({"content": label}))
         try:
             async for piece in chain.astream(
                 {"question": question, "history": history}
